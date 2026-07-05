@@ -23,6 +23,8 @@ from typing import Optional, Dict, Any, List
 import json
 import os
 import asyncio
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # ═══════════════════════════════════════════════════════════════
 #  CONFIGURATION  –  Edit these before running
@@ -97,20 +99,26 @@ def load_data() -> None:
             try:
                 import urllib.request
                 with urllib.request.urlopen(GIST_URL, timeout=10) as response:
-                    raw = json.loads(response.read().decode())
+                    content = response.read().decode()
+                    raw = json.loads(content) if content.strip() else {}
+                if isinstance(raw, list):
+                    raw = {}
                 print("Loaded ticket data from gist")
             except Exception as e:
                 print(f"Warning: Could not load from gist: {e}")
-                raw = {"open_tickets": {}, "ticket_channel_map": {}, "ticket_counters": {}, "vouch_counters": {}, "autorole_map": {}}
+                raw = {}
         else:
-            raw = {"open_tickets": {}, "ticket_channel_map": {}, "ticket_counters": {}, "vouch_counters": {}, "autorole_map": {}}
+            raw = {}
     else:
         try:
             with open(TICKET_DATA_FILE, "r") as f:
                 raw = json.load(f)
         except Exception as e:
             print(f"Warning: Could not load ticket data: {e}")
-            raw = {"open_tickets": {}, "ticket_channel_map": {}, "ticket_counters": {}, "vouch_counters": {}, "autorole_map": {}}
+            raw = {}
+
+    if not isinstance(raw, dict):
+        raw = {}
 
     open_tickets = {
         int(g): {int(u): v for u, v in users.items()}
@@ -840,7 +848,26 @@ async def on_member_join(member: discord.Member) -> None:
 #  RUN
 # ═══════════════════════════════════════════════════════════════
 
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"OK")
+    do_HEAD = do_GET
+    def log_message(self, format, *args):
+        pass
+
+def start_health_server(port):
+    try:
+        server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+        print(f"Health check server running on port {port}")
+        server.serve_forever()
+    except Exception as e:
+        print(f"Health check server error: {e}")
+
 if __name__ == "__main__":
+    HEALTH_PORT = int(os.getenv("HEALTH_PORT", "8080"))
     load_data()
     if BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
         print(
@@ -848,4 +875,5 @@ if __name__ == "__main__":
             "via the DISCORD_BOT_TOKEN environment variable."
         )
     else:
+        threading.Thread(target=start_health_server, args=(HEALTH_PORT,), daemon=True).start()
         bot.run(BOT_TOKEN, reconnect=True)
