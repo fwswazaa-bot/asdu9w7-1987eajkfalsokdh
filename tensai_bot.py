@@ -26,6 +26,7 @@ import asyncio
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
+
 # ═══════════════════════════════════════════════════════════════
 #  CONFIGURATION  –  Edit these before running
 # ═══════════════════════════════════════════════════════════════
@@ -46,7 +47,7 @@ GIST_URL = os.getenv("GIST_URL", "")
 
 # Branding
 BRAND = os.getenv("BRAND_NAME", "Tensai")
-BRAND_FOOTER = f"\u00a92026 {BRAND}. All rights reserved."
+BRAND_FOOTER = f"©2026 {BRAND}. All rights reserved."
 BRAND_URL = os.getenv("BRAND_URL", "https://tensai.services")
 
 # ═══════════════════════════════════════════════════════════════
@@ -60,6 +61,7 @@ intents.members = True
 intents.guild_messages = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
+
 
 # ═══════════════════════════════════════════════════════════════
 #  IN-MEMORY DATA  (also persisted to JSON)
@@ -76,11 +78,13 @@ vouch_counters: Dict[int, int] = {}
 # autorole_map[guild_id] = role_id (role to auto-assign to new members)
 autorole_map: Dict[int, int] = {}
 
+
 TICKET_TYPES: Dict[str, str] = {
     "purchase": "Purchase Ticket",
     "support": "Support Ticket",
     "hwid": "HWID Reset Ticket",
 }
+
 
 CATEGORY_NAMES: Dict[str, str] = {
     "purchase": "Purchase Tickets",
@@ -90,6 +94,7 @@ CATEGORY_NAMES: Dict[str, str] = {
 
 
 # ── Persistence helpers ────────────────────────────────────────
+
 
 def load_data() -> None:
     """Load ticket/vouch data from JSON file into global dicts. Falls back to gist."""
@@ -156,6 +161,7 @@ def save_data() -> None:
 
 
 # ── Helper functions ──────────────────────────────────────────
+
 
 def get_staff_role(guild: discord.Guild) -> Optional[discord.Role]:
     """Return the staff role by name, or None."""
@@ -229,6 +235,7 @@ def make_ticket_channel_name(member: discord.Member, ttype: str, number: int) ->
 #  MODALS
 # ═══════════════════════════════════════════════════════════════
 
+
 class VouchModal(ui.Modal, title="Submit a Vouch"):
     """Modal shown to users submitting a vouch via /vouch."""
 
@@ -247,7 +254,7 @@ class VouchModal(ui.Modal, title="Submit a Vouch"):
     )
     rating = ui.TextInput(
         label="Rating",
-        placeholder="e.g. 5/5, 10/10, \u2605\u2605\u2605\u2605\u2605",
+        placeholder="e.g. 5/5, 10/10, ★★★★★",
         required=True,
         max_length=20,
     )
@@ -263,7 +270,7 @@ class VouchModal(ui.Modal, title="Submit a Vouch"):
         vouch_num = get_vouch_number(guild_id)
 
         embed = discord.Embed(
-            title="\u2728 New Vouch!",
+            title="✨ New Vouch!",
             description=f"**{interaction.user.mention}** has submitted a new vouch!",
             color=discord.Color.green(),
             timestamp=datetime.now(),
@@ -286,42 +293,99 @@ class VouchModal(ui.Modal, title="Submit a Vouch"):
 
 # ── Ticket Modals (one per type) ──────────────────────────────
 
+
 class BaseTicketModal(ui.Modal):
     """Shared logic for all ticket-type modals."""
 
     def __init__(
         self,
-        channel: discord.TextChannel,
+        guild: discord.Guild,
         member: discord.Member,
         ttype: str,
         number: int,
         title: str,
     ) -> None:
         super().__init__(title=title)
-        self._channel = channel
+        self._guild = guild
         self._member = member
         self._ttype = ttype
         self._number = number
 
     async def _finish_ticket(self, interaction: discord.Interaction, embed: discord.Embed) -> None:
-        """Send the embed + close button into the ticket channel, then notify the user."""
-        content_parts = [interaction.guild.default_role.mention]
-        staff_role = get_staff_role(interaction.guild)
+        """Create the channel, send the embed + close button, then notify the user."""
+        # ── Create category if needed ─────────────────────────
+        try:
+            category = await find_or_create_category(self._guild, self._ttype)
+        except Exception as e:
+            await interaction.response.send_message(
+                f"❌ Failed to create category: {e}", ephemeral=True
+            )
+            return
+
+        # ── Channel permission overwrites ─────────────────────
+        staff_role = get_staff_role(self._guild)
+        channel_name = make_ticket_channel_name(self._member, self._ttype, self._number)
+        
+        overwrites: Dict[discord.Role, discord.PermissionOverwrite] = {
+            self._guild.default_role: discord.PermissionOverwrite(read_messages=False),
+            self._member: discord.PermissionOverwrite(
+                read_messages=True, send_messages=True,
+                attach_files=True, embed_links=True,
+            ),
+            self._guild.me: discord.PermissionOverwrite(
+                read_messages=True, send_messages=True,
+                manage_channels=True, manage_permissions=True,
+                manage_messages=True,
+            ),
+        }
+        if staff_role:
+            overwrites[staff_role] = discord.PermissionOverwrite(
+                read_messages=True, send_messages=True, manage_messages=True
+            )
+
+        # ── Create the channel ────────────────────────────────
+        try:
+            channel = await self._guild.create_text_channel(
+                name=channel_name,
+                category=category,
+                overwrites=overwrites,
+                reason=f"Ticket #{self._number} ({TICKET_TYPES[self._ttype]}) opened by {self._member}",
+            )
+        except Exception as e:
+            await interaction.response.send_message(
+                f"❌ Failed to create ticket channel: {e}", ephemeral=True
+            )
+            return
+
+        # ── Track it ──────────────────────────────────────────
+        guild_id = self._guild.id
+        open_tickets.setdefault(guild_id, {})[self._member.id] = {
+            "type": self._ttype, "channel_id": channel.id,
+        }
+        ticket_channel_map.setdefault(guild_id, {})[channel.id] = {
+            "user_id": self._member.id,
+            "type": self._ttype,
+            "number": self._number,
+        }
+        save_data()
+
+        # ── Send the embed and close button ───────────────────
+        content_parts = [self._guild.default_role.mention]
         if staff_role:
             content_parts.append(staff_role.mention)
-        await self._channel.send(content=" ".join(content_parts), embed=embed)
+        await channel.send(content=" ".join(content_parts), embed=embed)
 
         # Register the channel before sending the close view so the button
         # callback can verify permissions immediately (no race condition).
-        TicketCloseView._channel_registry[self._channel.id] = {
-            "guild_id": interaction.guild_id,
+        TicketCloseView._channel_registry[channel.id] = {
+            "guild_id": guild_id,
             "user_id": self._member.id,
         }
         close_view = TicketCloseView()
-        await self._channel.send("\u200b", view=close_view)
+        await channel.send("\u200b", view=close_view)
 
         await interaction.response.send_message(
-            f"\u2705 Your ticket has been created in {self._channel.mention}",
+            f"✅ Your ticket has been created in {channel.mention}",
             ephemeral=True,
         )
 
@@ -334,16 +398,16 @@ class PurchaseModal(BaseTicketModal):
     payment_method = ui.TextInput(label="Payment Method", placeholder="e.g. PayPal, Crypto, Card", required=True, max_length=100)
     order_id = ui.TextInput(label="Order ID (optional)", placeholder="Transaction / invoice ID if you have one", required=False, max_length=200)
 
-    def __init__(self, channel: discord.TextChannel, member: discord.Member, ttype: str, number: int) -> None:
-        super().__init__(channel, member, ttype, number, title="Purchase Ticket")
+    def __init__(self, guild: discord.Guild, member: discord.Member, ttype: str, number: int) -> None:
+        super().__init__(guild, member, ttype, number, title="Purchase Ticket")
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         embed = discord.Embed(
-            title=f"\U0001f6d2 {BRAND} \u2013 Purchase Ticket",
+            title=f"\U0001f6d2 {BRAND} – Purchase Ticket",
             description=(
                 "Please describe your question or issue below.\n\n"
-                "\u2022 Do not ping staff.\n"
-                "\u2022 Our team will assist you soon."
+                "• Do not ping staff.\n"
+                "• Our team will assist you soon."
             ),
             color=discord.Color.blue(),
             timestamp=datetime.now(),
@@ -365,16 +429,16 @@ class SupportModal(BaseTicketModal):
     steps_taken = ui.TextInput(label="Steps Already Taken", style=discord.TextStyle.long, placeholder="What have you tried so far?", required=False, max_length=2000)
     solution = ui.TextInput(label="Preferred Solution (optional)", placeholder="What solution are you hoping for?", required=False, max_length=500)
 
-    def __init__(self, channel: discord.TextChannel, member: discord.Member, ttype: str, number: int) -> None:
-        super().__init__(channel, member, ttype, number, title="Support Ticket")
+    def __init__(self, guild: discord.Guild, member: discord.Member, ttype: str, number: int) -> None:
+        super().__init__(guild, member, ttype, number, title="Support Ticket")
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         embed = discord.Embed(
-            title=f"\U0001f527 {BRAND} \u2013 Support Ticket",
+            title=f"\U0001f527 {BRAND} – Support Ticket",
             description=(
                 "Please describe your question or issue below.\n\n"
-                "\u2022 Do not ping staff.\n"
-                "\u2022 Our team will assist you soon."
+                "• Do not ping staff.\n"
+                "• Our team will assist you soon."
             ),
             color=discord.Color.orange(),
             timestamp=datetime.now(),
@@ -396,16 +460,16 @@ class HWIDModal(BaseTicketModal):
     new_hwid = ui.TextInput(label="New HWID", placeholder="Your new HWID / machine ID", required=True, max_length=200)
     proof = ui.TextInput(label="Proof of Purchase URL", placeholder="Link to purchase receipt or DM", required=False, max_length=500)
 
-    def __init__(self, channel: discord.TextChannel, member: discord.Member, ttype: str, number: int) -> None:
-        super().__init__(channel, member, ttype, number, title="HWID Reset Ticket")
+    def __init__(self, guild: discord.Guild, member: discord.Member, ttype: str, number: int) -> None:
+        super().__init__(guild, member, ttype, number, title="HWID Reset Ticket")
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         embed = discord.Embed(
-            title=f"\U0001f504 {BRAND} \u2013 HWID Reset Ticket",
+            title=f"\U0001f504 {BRAND} – HWID Reset Ticket",
             description=(
                 "Please describe your question or issue below.\n\n"
-                "\u2022 Do not ping staff.\n"
-                "\u2022 Our team will assist you soon."
+                "• Do not ping staff.\n"
+                "• Our team will assist you soon."
             ),
             color=discord.Color.purple(),
             timestamp=datetime.now(),
@@ -423,7 +487,9 @@ class HWIDModal(BaseTicketModal):
 #  VIEWS
 # ═══════════════════════════════════════════════════════════════
 
+
 # ── Ticket Panel (Dropdown) ───────────────────────────────────
+
 
 class TicketSelect(ui.Select):
     """Dropdown component for selecting a ticket type."""
@@ -469,7 +535,7 @@ class TicketSelect(ui.Select):
             existing_channel = guild.get_channel(existing["channel_id"])
             if existing_channel:
                 await interaction.response.send_message(
-                    f"\u26a0\ufe0f You already have an open {TICKET_TYPES[existing['type']]} "
+                    f"⚠️ You already have an open {TICKET_TYPES[existing['type']]} "
                     f"in {existing_channel.mention}. "
                     "Please close it before opening a new one.",
                     ephemeral=True,
@@ -479,70 +545,16 @@ class TicketSelect(ui.Select):
             del open_tickets[guild_id][member.id]
             save_data()
 
-        # ── Create category if needed ─────────────────────────
-        try:
-            category = await find_or_create_category(guild, ttype)
-        except Exception as e:
-            await interaction.response.send_message(
-                f"\u274c Failed to create category: {e}", ephemeral=True
-            )
-            return
-
-        # ── Ticket number & channel name ──────────────────────
+        # ── Ticket number ─────────────────────────────────────
         number = get_ticket_number(guild_id, ttype)
-        channel_name = make_ticket_channel_name(member, ttype, number)
 
-        # ── Channel permission overwrites ─────────────────────
-        staff_role = get_staff_role(guild)
-        overwrites: Dict[discord.Role, discord.PermissionOverwrite] = {
-            guild.default_role: discord.PermissionOverwrite(read_messages=False),
-            member: discord.PermissionOverwrite(
-                read_messages=True, send_messages=True,
-                attach_files=True, embed_links=True,
-            ),
-            guild.me: discord.PermissionOverwrite(
-                read_messages=True, send_messages=True,
-                manage_channels=True, manage_permissions=True,
-                manage_messages=True,
-            ),
-        }
-        if staff_role:
-            overwrites[staff_role] = discord.PermissionOverwrite(
-                read_messages=True, send_messages=True, manage_messages=True
-            )
-
-        # ── Create the channel ────────────────────────────────
-        try:
-            channel = await guild.create_text_channel(
-                name=channel_name,
-                category=category,
-                overwrites=overwrites,
-                reason=f"Ticket #{number} ({TICKET_TYPES[ttype]}) opened by {member}",
-            )
-        except Exception as e:
-            await interaction.response.send_message(
-                f"\u274c Failed to create ticket channel: {e}", ephemeral=True
-            )
-            return
-
-        # ── Track it ──────────────────────────────────────────
-        open_tickets.setdefault(guild_id, {})[member.id] = {
-            "type": ttype, "channel_id": channel.id,
-        }
-        ticket_channel_map.setdefault(guild_id, {})[channel.id] = {
-            "user_id": member.id,
-            "type": ttype,
-            "number": number,
-        }
-        save_data()
-
-        # ── Show the appropriate modal ────────────────────────
+        # ── Show the appropriate modal (channel created on submit) ──
         modals: Dict[str, type] = {
             "purchase": PurchaseModal,
             "support": SupportModal,
             "hwid": HWIDModal,
         }
-        modal = modals[ttype](channel, member, ttype, number)
+        modal = modals[ttype](guild, member, ttype, number)
         await interaction.response.send_modal(modal)
 
 
@@ -555,6 +567,7 @@ class TicketPanelView(ui.View):
 
 
 # ── Ticket Close Button ───────────────────────────────────────
+
 
 class TicketCloseView(ui.View):
     """Self-contained close button for ticket channels.
@@ -593,7 +606,7 @@ class TicketCloseView(ui.View):
 
         if not info:
             await interaction.response.send_message(
-                "\u274c Could not identify this ticket channel.", ephemeral=True
+                "❌ Could not identify this ticket channel.", ephemeral=True
             )
             return
 
@@ -608,13 +621,13 @@ class TicketCloseView(ui.View):
 
         if not (is_creator or is_staff or is_admin):
             await interaction.response.send_message(
-                "\u274c Only the ticket creator or staff can close this ticket.",
+                "❌ Only the ticket creator or staff can close this ticket.",
                 ephemeral=True,
             )
             return
 
         # ── Confirm and close ─────────────────────────────────
-        await interaction.response.send_message("\u23f3 Closing this ticket in 3 seconds...")
+        await interaction.response.send_message("⏳ Closing this ticket in 3 seconds...")
         await asyncio.sleep(3)
 
         channel = interaction.channel
@@ -628,7 +641,7 @@ class TicketCloseView(ui.View):
             await channel.delete(reason=f"Ticket closed by {user}")
         except discord.Forbidden:
             await interaction.followup.send(
-                "\u274c I don't have permission to delete this channel."
+                "❌ I don't have permission to delete this channel."
             )
             return
         except discord.NotFound:
@@ -654,13 +667,14 @@ class TicketCloseView(ui.View):
 #  PREFIX COMMANDS
 # ═══════════════════════════════════════════════════════════════
 
+
 @bot.command(name="lock")
 @commands.has_permissions(administrator=True)
 async def lock(ctx: commands.Context) -> None:
     """Lock the current channel so only admins can speak."""
     channel = ctx.channel
     if not isinstance(channel, discord.TextChannel):
-        await ctx.send("\u274c This command only works in text channels.")
+        await ctx.send("❌ This command only works in text channels.")
         return
 
     overwrite = channel.overwrites_for(ctx.guild.default_role)
@@ -673,20 +687,21 @@ async def lock(ctx: commands.Context) -> None:
             "Only administrators may speak."
         )
     except discord.Forbidden:
-        await ctx.send("\u274c I don't have permission to manage this channel.")
+        await ctx.send("❌ I don't have permission to manage this channel.")
 
 
 @lock.error
 async def lock_error(ctx: commands.Context, error: commands.CommandError) -> None:
     if isinstance(error, commands.MissingPermissions):
         await ctx.send(
-            "\u274c You need the **Administrator** permission to use this command."
+            "❌ You need the **Administrator** permission to use this command."
         )
 
 
 # ═══════════════════════════════════════════════════════════════
 #  SLASH COMMANDS
 # ═══════════════════════════════════════════════════════════════
+
 
 @bot.tree.command(
     name="vouch",
@@ -702,7 +717,7 @@ async def vouch(interaction: discord.Interaction) -> None:
         )
         if not is_authorized:
             await interaction.response.send_message(
-                "\u274c You do not have permission to use this command.",
+                "❌ You do not have permission to use this command.",
                 ephemeral=True,
             )
             return
@@ -721,14 +736,14 @@ async def ticket(interaction: discord.Interaction) -> None:
         description=(
             "To open a ticket, please select the category below that best "
             "matches your inquiry.\n\n"
-            "\u2022 We do **not** assist customers who purchased through "
+            "• We do **not** assist customers who purchased through "
             "unauthorized resellers.\n"
-            "\u2022 Please refrain from opening multiple tickets \u2014 "
+            "• Please refrain from opening multiple tickets — "
             "duplicate tickets will be closed.\n"
-            "\u2022 Provide a detailed explanation of your issue, including "
+            "• Provide a detailed explanation of your issue, including "
             "any relevant screenshots or videos.\n"
-            "\u2022 Your cooperation throughout the process is expected.\n"
-            "\u2022 Maintain a respectful and courteous attitude at all times."
+            "• Your cooperation throughout the process is expected.\n"
+            "• Maintain a respectful and courteous attitude at all times."
         ),
         color=discord.Color.blue(),
     )
@@ -736,7 +751,8 @@ async def ticket(interaction: discord.Interaction) -> None:
 
     view = TicketPanelView()
     await interaction.response.send_message(embed=embed, view=view)
-
+  
+  
 
 
 @bot.tree.command(
@@ -751,7 +767,7 @@ async def setautorole(interaction: discord.Interaction, role: discord.Role) -> N
     autorole_map[guild_id] = role.id
     save_data()
     await interaction.response.send_message(
-        f"\u2705 Auto-role set to **{role.mention}** "
+        f"✅ Auto-role set to **{role.mention}** "
         f"({role.name}). New members will now automatically receive this role.",
         ephemeral=False,
     )
@@ -763,18 +779,20 @@ async def setautorole_error(
 ) -> None:
     if isinstance(error, app_commands.MissingPermissions):
         await interaction.response.send_message(
-            "\u274c You need the **Administrator** permission to use this command.",
+            "❌ You need the **Administrator** permission to use this command.",
             ephemeral=True,
         )
+
 
 # ═══════════════════════════════════════════════════════════════
 #  EVENTS
 # ═══════════════════════════════════════════════════════════════
 
+
 @bot.event
 async def on_ready() -> None:
     """Fires when the bot has connected and cached data."""
-    print(f"\u2705 Logged in as {bot.user} (ID: {bot.user.id})")
+    print(f"✅ Logged in as {bot.user} (ID: {bot.user.id})")
     print(f"   Serving {len(bot.guilds)} guild(s)")
 
     # Register persistent views (they use custom_id for dispatch)
@@ -788,7 +806,7 @@ async def on_ready() -> None:
     except Exception as e:
         print(f"   Failed to sync commands: {e}")
 
-    print("\u2500\u2500 Bot ready \u2500\u2500")
+    print("── Bot ready ──")
 
 
 @bot.event
@@ -816,7 +834,6 @@ async def on_guild_channel_delete(channel: discord.abc.GuildChannel) -> None:
     # Check if the parent category should be cleaned up
     if channel.category:
         await cleanup_empty_category(channel.guild, channel.category)
-
 
 
 @bot.event
@@ -848,6 +865,7 @@ async def on_member_join(member: discord.Member) -> None:
 #  RUN
 # ═══════════════════════════════════════════════════════════════
 
+
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -858,6 +876,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass
 
+
 def start_health_server(port):
     try:
         server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
@@ -866,12 +885,13 @@ def start_health_server(port):
     except Exception as e:
         print(f"Health check server error: {e}")
 
+
 if __name__ == "__main__":
     HEALTH_PORT = int(os.getenv("HEALTH_PORT", "8080"))
     load_data()
     if BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
         print(
-            "\u274c Please set your bot token in the script or "
+            "❌ Please set your bot token in the script or "
             "via the DISCORD_BOT_TOKEN environment variable."
         )
     else:
